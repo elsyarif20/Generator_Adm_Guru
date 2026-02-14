@@ -11,8 +11,10 @@ import Notification from './components/Notification';
 import GroundedSearch from './components/GroundedSearch';
 import ActivityLog from './components/ActivityLog';
 import FeedbackForm from './components/FeedbackForm';
-import { View, Module, FormData, HistoryItem, NotificationType, GeneratedSection, ActivityLogItem, FeedbackItem } from './types';
+import UserProgress from './components/UserProgress';
+import { View, Module, FormData, HistoryItem, NotificationType, GeneratedSection, ActivityLogItem, FeedbackItem, User } from './types';
 import { getCPSuggestions, getTopicSuggestions, generateAdminContent, generateSoalContentSections, generateTryoutContent } from './services/geminiService';
+import { getUsers, updateUserActivity } from './services/userService';
 
 const App: React.FC = () => {
   const [view, setView] = useState<View>('dashboard');
@@ -31,6 +33,7 @@ const App: React.FC = () => {
   
   const [activityLog, setActivityLog] = useState<ActivityLogItem[]>([]);
   const [feedback, setFeedback] = useState<FeedbackItem[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   
   useEffect(() => {
     try {
@@ -45,6 +48,9 @@ const App: React.FC = () => {
 
       const savedSessionData = localStorage.getItem('savedGenerationSession');
       if (savedSessionData) setSavedSession(JSON.parse(savedSessionData));
+
+      const storedUsers = getUsers();
+      setUsers(storedUsers);
 
     } catch (error) {
       console.error("Failed to load data from localStorage", error);
@@ -147,7 +153,7 @@ const App: React.FC = () => {
 
     const newLog: ActivityLogItem = {
       id: Date.now().toString(),
-      user: "Guru",
+      user: formData.nama_guru || "Guru",
       module_type: module,
       details: details,
       created_at: new Date().toISOString(),
@@ -219,6 +225,10 @@ const App: React.FC = () => {
           };
           setHistory(prev => [newHistoryItem, ...prev]);
           addActivityLog(formData, currentModule);
+          
+          const updatedUsers = updateUserActivity(formData.nama_guru, currentModule);
+          setUsers(updatedUsers);
+
           showNotification('Perangkat berhasil digenerate!', 'success');
       });
 
@@ -350,7 +360,7 @@ const App: React.FC = () => {
         
         {view === 'dashboard' && (
             <>
-                <div className="grid lg:grid-cols-2 gap-8 mt-8">
+                <div className="grid lg:grid-cols-3 gap-8 mt-8">
                     <HistoryList 
                         history={history}
                         onView={handleViewHistory}
@@ -359,6 +369,7 @@ const App: React.FC = () => {
                     <ActivityLog
                         logs={activityLog}
                     />
+                    <UserProgress users={users} />
                 </div>
                 <div className="mt-8">
                     <FeedbackForm onFeedbackSubmit={handleFeedbackSubmit} />

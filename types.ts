@@ -100,3 +100,16 @@ export interface ShareableLink {
   usageCount: number;
   createdAt: string;
 }
+
+export interface User {
+  id: string; // normalized name
+  name: string; // original name
+  firstSeen: string;
+  lastSeen: string;
+  usageStats: {
+    admin: number;
+    soal: number;
+    tryout: number;
+  };
+  totalGenerations: number;
+}
