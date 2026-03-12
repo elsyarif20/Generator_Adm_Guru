@@ -15,6 +15,7 @@ import UserProgress from './components/UserProgress';
 import { View, Module, FormData, HistoryItem, NotificationType, GeneratedSection, ActivityLogItem, FeedbackItem, User } from './types';
 import { getCPSuggestions, getTopicSuggestions, generateAdminContent, generateSoalContentSections, generateTryoutContent } from './services/geminiService';
 import { getUsers, updateUserActivity } from './services/userService';
+import { saveFeedbackToFirestore, saveUserActivityToFirebase } from './services/firebaseService';
 
 const App: React.FC = () => {
   const [view, setView] = useState<View>('dashboard');
@@ -150,15 +151,19 @@ const App: React.FC = () => {
   
   const addActivityLog = (formData: FormData, module: Module) => {
     const details = `${formData.mata_pelajaran} - Kelas ${formData.kelas}`;
+    const userName = formData.nama_guru || "Guru";
 
     const newLog: ActivityLogItem = {
       id: Date.now().toString(),
-      user: formData.nama_guru || "Guru",
+      user: userName,
       module_type: module,
       details: details,
       created_at: new Date().toISOString(),
     };
     setActivityLog(prev => [newLog, ...prev]);
+    
+    // Save to Firebase (will fail silently if not configured)
+    saveUserActivityToFirebase(userName.replace(/[^a-zA-Z0-9]/g, '_'), newLog);
   };
 
   const startLoadingSimulation = (formData: FormData) => {
@@ -298,6 +303,10 @@ const App: React.FC = () => {
         created_at: new Date().toISOString(),
     };
     setFeedback(prev => [newFeedback, ...prev]);
+    
+    // Save to Firebase (will fail silently if not configured)
+    saveFeedbackToFirestore(newFeedback);
+    
     showNotification('Terima kasih atas masukan Anda!', 'success');
   };
 
