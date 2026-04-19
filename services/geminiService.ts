@@ -1,10 +1,18 @@
 
 import { GoogleGenAI, Modality, Type, GenerateContentResponse } from "@google/genai";
 import { FormData, GeneratedSection, GroundingSource } from "../types";
+import Groq from "groq-sdk";
 
 // Helper function to safely get the AI client
 const getAiClient = (): GoogleGenAI => {
     return new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+};
+
+// Groq client
+const getGroqClient = () => {
+    const apiKey = import.meta.env.VITE_GROQ_API_KEY;
+    if (!apiKey) return null;
+    return new Groq({ apiKey, dangerouslyAllowBrowser: true });
 };
 
 // Audio decoding helpers
@@ -73,13 +81,46 @@ const cleanAndParseJson = (text: string): any => {
     }
 };
 
-const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> => {
+const withRetry = async <T>(fn: () => Promise<T>, retries = 2, delay = 2000): Promise<T> => {
     try {
         return await fn();
     } catch (error: any) {
-        if (retries > 0 && (error.toString().toLowerCase().includes('503') || error.toString().toLowerCase().includes('unavailable'))) {
+        const errorMsg = error.toString().toLowerCase();
+        const isQuotaError = errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('limit') || errorMsg.includes('rate limit');
+        const isUnavailable = errorMsg.includes('503') || errorMsg.includes('unavailable');
+        
+        if (retries > 0 && (isQuotaError || isUnavailable)) {
             await new Promise(res => setTimeout(res, delay));
             return withRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+};
+
+const withGroqFallback = async (geminiFn: () => Promise<any>, groqPrompt: string, systemPrompt?: string): Promise<any> => {
+    try {
+        return await geminiFn();
+    } catch (error: any) {
+        const errorMsg = error.toString().toLowerCase();
+        const isQuotaError = errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('limit') || errorMsg.includes('rate limit');
+        
+        if (isQuotaError) {
+            console.warn("Gemini limit reached, falling back to Groq...");
+            const groq = getGroqClient();
+            if (groq) {
+                const completion = await groq.chat.completions.create({
+                    messages: [
+                        ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+                        { role: "user", content: groqPrompt }
+                    ],
+                    model: "llama-3.3-70b-versatile",
+                    temperature: 0.7,
+                    response_format: { type: "json_object" }
+                } as any);
+                
+                const responseText = completion.choices[0]?.message?.content || "";
+                return { text: responseText };
+            }
         }
         throw error;
     }
@@ -110,21 +151,26 @@ export const generateAdminContent = async (formData: FormData): Promise<Generate
         : "";
     const mathInstruction = "**FORMAT MATEMATIKA PENTING:** Jika menuliskan rumus atau angka berpangkat, WAJIB menggunakan superscript Unicode (seperti x², m³, 10⁻⁴). JANGAN GUNAKAN simbol caret (^).";
 
-    const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: `Anda adalah asisten ahli guru. Buat dokumen administrasi Kurikulum Merdeka.
-        **Data:** ${formData.mata_pelajaran}, Kelas ${formData.kelas}, Fase ${formData.fase}, CP: ${formData.cp_elements}.
+    const systemPrompt = `Anda adalah asisten ahli guru. Buat dokumen administrasi Kurikulum Merdeka. Gunakan tag '<table>' untuk semua dokumen. Output WAJIB JSON dengan array 'sections' berisi objek {id, title, content}.`;
+    const userPrompt = `Data: ${formData.mata_pelajaran}, Kelas ${formData.kelas}, Fase ${formData.fase}, CP: ${formData.cp_elements}.
         Tugas: Generate ATP, Prota, Promes, Modul Ajar, KKTP, dan Jurnal Harian dalam format JSON.
         ${harakatInstruction}
-        ${mathInstruction}
-        Gunakan tag '<table>' untuk semua dokumen.`,
-        config: {
-            responseMimeType: 'application/json',
-            responseSchema: sectionsSchema,
-            temperature: 0.7,
-            ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
-        }
-    }));
+        ${mathInstruction}`;
+
+    const response = await withGroqFallback(
+        () => withRetry(() => ai.models.generateContent({
+            model: 'gemini-3-pro-preview',
+            contents: `${systemPrompt}\n\n${userPrompt}`,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: sectionsSchema,
+                temperature: 0.7,
+                ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
+            }
+        })),
+        userPrompt,
+        systemPrompt
+    );
 
     const result = cleanAndParseJson(response.text);
     return result.sections;
@@ -142,7 +188,8 @@ export const generateSoalContentSections = async (formData: FormData): Promise<G
     ${formData.sertakan_soal_tka_uraian ? `- Tambahkan TEPAT ${formData.jumlah_soal_tka_uraian} soal Uraian/Essay TKA.` : ''}`;
     }
 
-    const prompt = `Buat paket asesmen lengkap: Naskah Soal, Kunci Jawaban & Pembahasan, Kisi-kisi, Rubrik, Analisis Kualitatif, dan Ringkasan Materi.
+    const systemPrompt = "Anda adalah asisten ahli pembuat soal. Buat paket asesmen lengkap dalam format JSON dengan array 'sections' berisi objek {id, title, content}.";
+    const userPrompt = `Buat paket asesmen lengkap: Naskah Soal, Kunci Jawaban & Pembahasan, Kisi-kisi, Rubrik, Analisis Kualitatif, dan Ringkasan Materi.
     Mapel: ${formData.mata_pelajaran}, Topik: ${formData.topik_materi}.
     Tingkat Kesulitan: ${formData.tingkat_kesulitan}.
     
@@ -154,19 +201,22 @@ export const generateSoalContentSections = async (formData: FormData): Promise<G
     
     **PENTING:** Anda DILARANG KERAS meringkas, memotong, atau mempersingkat jumlah soal. Jika diminta 30 soal, Anda harus memberikan 30 soal lengkap satu per satu. Jangan berhenti di tengah jalan atau memberikan contoh saja.
     
-    ${mathInstruction}
-    JSON format dengan sections array.`;
+    ${mathInstruction}`;
 
-    const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: prompt,
-        config: {
-            responseMimeType: 'application/json',
-            responseSchema: sectionsSchema,
-            temperature: 0.5,
-            ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
-        }
-    }));
+    const response = await withGroqFallback(
+        () => withRetry(() => ai.models.generateContent({
+            model: 'gemini-3-pro-preview',
+            contents: `${systemPrompt}\n\n${userPrompt}`,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: sectionsSchema,
+                temperature: 0.5,
+                ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
+            }
+        })),
+        userPrompt,
+        systemPrompt
+    );
 
     const result = cleanAndParseJson(response.text);
     return result.sections;
@@ -176,7 +226,8 @@ export const generateTryoutContent = async (formData: FormData): Promise<Generat
     const ai = getAiClient();
     const mathInstruction = "**FORMAT MATEMATIKA PENTING:** Gunakan superscript Unicode (x², m³, 10⁻⁴). JANGAN GUNAKAN simbol caret (^).";
     
-    const prompt = `Buat paket asesmen KOMPREHENSIF (TRY OUT / UAS) untuk jenjang SMA.
+    const systemPrompt = "Anda adalah asisten ahli pembuat Try Out. Generate output dalam format JSON yang berisi array 'sections' dengan objek {id, title, content}. Gunakan HTML dalam 'content'.";
+    const userPrompt = `Buat paket asesmen KOMPREHENSIF (TRY OUT / UAS) untuk jenjang SMA.
     Mata Pelajaran: ${formData.mata_pelajaran}
     Kelompok TKA: ${formData.kelompok_tka}
     Bahasa: ${formData.bahasa}
@@ -192,26 +243,22 @@ export const generateTryoutContent = async (formData: FormData): Promise<Generat
     
     **INSTRUKSI KRITIKAL:** Anda HARUS menuliskan setiap butir soal secara lengkap. JANGAN memberikan ringkasan atau memotong output. Total soal harus sesuai akumulasi angka di atas. Kualitas dan kuantitas adalah prioritas utama.
     
-    ${mathInstruction}
-    
-    Generate output dalam format JSON yang berisi array of 'sections'. Setiap section mencakup:
-    - Naskah Soal (Gunakan tabel untuk soal PG).
-    - Kunci Jawaban & Pembahasan Mendalam.
-    - Kisi-kisi Soal (Tabel: No, Materi, Kelas, Level Kognitif, Indikator).
-    - Rubrik Penilaian.
-    
-    Format output: JSON dengan properti 'sections' berisi objek {id, title, content}. Gunakan HTML dalam 'content'.`;
+    ${mathInstruction}`;
 
-    const response: GenerateContentResponse = await withRetry(() => ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: prompt,
-        config: {
-            responseMimeType: 'application/json',
-            responseSchema: sectionsSchema,
-            temperature: 0.6,
-            ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
-        }
-    }));
+    const response = await withGroqFallback(
+        () => withRetry(() => ai.models.generateContent({
+            model: 'gemini-3-pro-preview',
+            contents: `${systemPrompt}\n\n${userPrompt}`,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: sectionsSchema,
+                temperature: 0.6,
+                ...(formData.use_thinking_mode && { thinkingConfig: { thinkingBudget: 32768 } })
+            }
+        })),
+        userPrompt,
+        systemPrompt
+    );
 
     const result = cleanAndParseJson(response.text);
     return result.sections;

@@ -164,6 +164,10 @@ const App: React.FC = () => {
     
     // Save to Firebase (will fail silently if not configured)
     saveUserActivityToFirebase(userName.replace(/[^a-zA-Z0-9]/g, '_'), newLog);
+
+    // Update user stats and progress
+    const updatedUsers = updateUserActivity(userName, module);
+    setUsers(updatedUsers);
   };
 
   const startLoadingSimulation = (formData: FormData) => {
@@ -231,9 +235,6 @@ const App: React.FC = () => {
           setHistory(prev => [newHistoryItem, ...prev]);
           addActivityLog(formData, currentModule);
           
-          const updatedUsers = updateUserActivity(formData.nama_guru, currentModule);
-          setUsers(updatedUsers);
-
           showNotification('Perangkat berhasil digenerate!', 'success');
       });
 

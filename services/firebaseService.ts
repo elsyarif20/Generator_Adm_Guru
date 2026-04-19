@@ -13,6 +13,14 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:42273456165:web:2c09d8a439188bd186bfcc"
 };
 
+const isValidUrl = (url: string) => {
+  try {
+    return url && url.startsWith('https://') && url.includes('.firebaseio.com');
+  } catch {
+    return false;
+  }
+};
+
 const isFirebaseConfigured = () => {
   return !!(firebaseConfig.apiKey && firebaseConfig.projectId);
 };
@@ -25,7 +33,14 @@ export let firestore: any = null;
 if (isFirebaseConfigured()) {
   try {
     app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    database = getDatabase(app);
+    
+    // Only initialize database if URL is valid to prevent fatal parsing errors
+    if (isValidUrl(firebaseConfig.databaseURL)) {
+      database = getDatabase(app, firebaseConfig.databaseURL);
+    } else {
+      console.warn("Firebase Database URL is missing or invalid. Realtime Database features will be disabled.");
+    }
+    
     firestore = getFirestore(app);
   } catch (error) {
     console.error("Error initializing Firebase:", error);
